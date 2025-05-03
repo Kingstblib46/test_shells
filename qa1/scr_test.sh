@@ -1,0 +1,1 @@
+./src/test/test_dogecoin --log_level=all --run_test=script_tests/script_OP_CHECKZKP_execution
