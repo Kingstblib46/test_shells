@@ -1,264 +1,260 @@
 #!/bin/bash
-# filepath: /root/autodl-tmp/work/test_zkp_optimized.sh
+# filepath: /root/autodl-tmp/work/test_zkp_tx.sh
 
 # 设置变量
 WORK_DIR="/root/autodl-tmp/work"
 DOGECOIN_TX="/root/autodl-tmp/dogecoin/src/dogecoin-tx"
-DOGECOIN_CLI="/root/autodl-tmp/dogecoin/src/dogecoin-cli"
 DOGECOIN_SRC="/root/autodl-tmp/dogecoin/src"
 RESULTS_DIR="$WORK_DIR/test_results"
+LOGS_DIR="$RESULTS_DIR/logs"
+JSON_FILE="/root/autodl-tmp/qa1/zkp_stack_dip69.json"
 
-# 创建测试目录
-mkdir -p "$RESULTS_DIR"
+# 创建测试目录结构
+mkdir -p "$RESULTS_DIR" "$LOGS_DIR"
 cd "$WORK_DIR"
 echo "当前工作目录: $(pwd)"
 
-echo "=== OP_CHECKZKP 实现验证测试 ==="
+echo "=== OP_CHECKZKP 交易创建与解码测试 ==="
+echo "使用ZK证明数据: $JSON_FILE"
 echo "测试结果保存到: $RESULTS_DIR"
 
-# ----------------------------------------------------------------
-# 1. 验证源码定义 - 直接检查源码中的操作码定义
-# ----------------------------------------------------------------
-echo -e "\n测试1: 验证 OP_CHECKZKP 在源码中的定义"
-
-# 从script.h提取操作码定义
-if grep -n "OP_CHECKZKP" "$DOGECOIN_SRC/script/script.h" > "$RESULTS_DIR/checkzkp_definition.txt"; then
-    DEFINITION=$(grep "OP_CHECKZKP" "$DOGECOIN_SRC/script/script.h")
-    echo "找到定义: $DEFINITION"
-    
-    # 检查是否正确定义为0xb9
-    if echo "$DEFINITION" | grep -q "0xb9"; then
-        echo "✓ OP_CHECKZKP 正确定义为 0xb9"
-    else
-        echo "✗ OP_CHECKZKP 定义不是 0xb9"
-    fi
-    
-    # 检查是否正确别名为OP_NOP10
-    if grep -q "OP_NOP10 = OP_CHECKZKP" "$DOGECOIN_SRC/script/script.h"; then
-        echo "✓ OP_NOP10 正确别名为 OP_CHECKZKP"
-    else
-        echo "✗ OP_NOP10 未正确别名为 OP_CHECKZKP"
-    fi
-else
-    echo "✗ 未找到 OP_CHECKZKP 定义"
+# 检查工具依赖
+if ! command -v jq &> /dev/null; then
+    echo "错误: 需要jq工具来解析JSON。请安装: apt-get install jq"
+    exit 1
 fi
 
-# ----------------------------------------------------------------
-# 2. 工具兼容性测试 - 测试dogecoin-tx解析能力
-# ----------------------------------------------------------------
-echo -e "\n测试2: dogecoin-tx 工具兼容性测试"
-echo "创建基本交易..."
-RAW_TX=$($DOGECOIN_TX -create)
-[ $? -ne 0 ] && echo "错误: 创建空交易失败" && exit 1
+# 检查dogecoin-tx是否可用
+if [ ! -f "$DOGECOIN_TX" ]; then
+    echo "错误: dogecoin-tx工具不存在: $DOGECOIN_TX"
+    exit 1
+fi
 
-TXID="0000000000000000000000000000000000000000000000000000000000000000"
-VOUT=0
-RAW_TX=$($DOGECOIN_TX $RAW_TX in=$TXID:$VOUT)
-[ $? -ne 0 ] && echo "错误: 添加输入失败" && exit 1
+# 检查JSON文件是否存在
+if [ ! -f "$JSON_FILE" ]; then
+    echo "错误: ZK证明数据文件不存在: $JSON_FILE"
+    exit 1
+fi
 
-# 2.1 测试所有基本操作码的解析，确定工具支持的范围
-echo "测试基本操作码解析..."
-echo "操作码解析测试结果:" > "$RESULTS_DIR/opcode_parse_test.txt"
+# 读取JSON数据并验证
+echo -e "\n1. 验证ZK证明JSON数据"
+JSON_DATA=$(cat "$JSON_FILE")
+ELEMENT_COUNT=$(echo "$JSON_DATA" | jq 'length')
 
-# 创建测试操作码数组：0x00-0x50区间
-declare -a BASIC_OPCODES=(
-    "00:OP_0" "51:OP_1" "52:OP_2" "53:OP_3" "54:OP_4" 
-    "55:OP_5" "61:OP_NOP" "75:OP_DROP" "76:OP_DUP"
-    "87:OP_EQUAL" "ac:OP_CHECKSIG" "6a:OP_RETURN" 
-)
+echo "找到 $ELEMENT_COUNT 个数据元素"
+if [ "$ELEMENT_COUNT" -ne 17 ]; then
+    echo "警告: 预期17个元素，但找到 $ELEMENT_COUNT 个"
+fi
 
-for OPCODE_PAIR in "${BASIC_OPCODES[@]}"; do
-    IFS=':' read -r HEX_CODE NAME <<< "$OPCODE_PAIR"
-    SCRIPT="${HEX_CODE}"
-    RESULT=$($DOGECOIN_TX $RAW_TX outscript=0.1:$SCRIPT 2>&1)
+# 保存所有元素到数组并计算总大小
+declare -a ZKP_ELEMENTS
+TOTAL_BYTES=0
+
+for i in $(seq 0 $((ELEMENT_COUNT-1))); do
+    ELEMENT=$(echo "$JSON_DATA" | jq -r ".[$i]")
+    ZKP_ELEMENTS[$i]="$ELEMENT"
+    ELEMENT_BYTES=$((${#ELEMENT} / 2))
+    TOTAL_BYTES=$((TOTAL_BYTES + ELEMENT_BYTES))
+    echo "元素 $i: ${ZKP_ELEMENTS[$i]} (${ELEMENT_BYTES} 字节)"
+done
+
+echo "ZK证明数据总大小: $TOTAL_BYTES 字节"
+
+# 创建测试函数 - 使用逐步增加元素的方式测试
+test_with_elements() {
+    local count=$1
+    local use_hex_format=$2
+    local test_name="elements_${count}"
     
-    if [[ "$RESULT" == *"error"* ]]; then
-        echo "  ${NAME} (0x${HEX_CODE}) 不被支持: ${RESULT}" | tee -a "$RESULTS_DIR/opcode_parse_test.txt"
+    if [ "$use_hex_format" = true ]; then
+        test_name="hex_${test_name}"
+    fi
+    
+    echo -e "\n测试: 使用前 $count 个ZK证明元素 ($test_name)"
+    
+    # 构建脚本
+    SCRIPT_CMD=""
+    HEX_SCRIPT=""
+    
+    for i in $(seq 0 $((count-1))); do
+        if [[ -n "${ZKP_ELEMENTS[$i]}" && "${ZKP_ELEMENTS[$i]}" != "null" ]]; then
+            if [ "$use_hex_format" = true ]; then
+                # 十六进制模式 - 计算长度前缀
+                LENGTH=${#ZKP_ELEMENTS[$i]}
+                LENGTH_HEX=$(printf "%02x" $((LENGTH/2)))
+                HEX_SCRIPT+="$LENGTH_HEX${ZKP_ELEMENTS[$i]}"
+            else
+                # 常规模式
+                SCRIPT_CMD+="0x${ZKP_ELEMENTS[$i]} "
+            fi
+        fi
+    done
+    
+    # 添加OP_CHECKZKP
+    if [ "$use_hex_format" = true ]; then
+        HEX_SCRIPT+="b9"
+        echo "使用十六进制脚本: $HEX_SCRIPT"
+        TX_RESULT=$($DOGECOIN_TX -create outscript=0.001:0x"$HEX_SCRIPT" 2>&1)
     else
-        echo "  ${NAME} (0x${HEX_CODE}) 被支持" | tee -a "$RESULTS_DIR/opcode_parse_test.txt"
+        SCRIPT_CMD+="OP_CHECKZKP"
+        echo "使用脚本: $SCRIPT_CMD"
+        TX_RESULT=$($DOGECOIN_TX -allowallopcodes -create outscript=0.001:"$SCRIPT_CMD" 2>&1)
+    fi
+    
+    # 保存结果和日志
+    echo "$TX_RESULT" > "$LOGS_DIR/${test_name}_tx_result.log"
+    
+    # 检查创建结果
+    if [[ "$TX_RESULT" == *"error"* ]]; then
+        echo "✗ 交易创建失败"
+        echo "错误信息: $TX_RESULT"
+        return 1
+    else
+        echo "✓ 交易创建成功"
+        echo "$TX_RESULT" > "$RESULTS_DIR/${test_name}_tx.hex"
+        
+        # 尝试解码交易
+        echo "尝试解码交易..."
+        DECODE_RESULT=$($DOGECOIN_TX -json $(cat "$RESULTS_DIR/${test_name}_tx.hex") 2>&1)
+        echo "$DECODE_RESULT" > "$LOGS_DIR/${test_name}_decode_result.log"
+        
+        if [[ "$DECODE_RESULT" == *"error"* ]]; then
+            echo "✗ 交易解码失败"
+            # 提取和分析错误
+            if [[ "$DECODE_RESULT" == *"asm"*"[error]"* ]]; then
+                echo "错误类型: 脚本ASM解析错误"
+                # 计算脚本hex长度
+                if [[ "$DECODE_RESULT" == *"\"hex\": \""*"\""* ]]; then
+                    HEX_PART=$(echo "$DECODE_RESULT" | grep -o '"hex": "[^"]*"' | cut -d'"' -f4)
+                    HEX_LENGTH=${#HEX_PART}
+                    HEX_BYTES=$((HEX_LENGTH / 2))
+                    echo "脚本十六进制长度: $HEX_LENGTH 字符 ($HEX_BYTES 字节)"
+                    
+                    # 检查是否接近脚本大小限制
+                    if [ $HEX_BYTES -gt 9000 ]; then
+                        echo "警告: 脚本大小接近或超过限制 (10KB)"
+                    fi
+                fi
+            else
+                echo "错误信息: $DECODE_RESULT"
+            fi
+            return 2
+        else
+            echo "✓ 交易解码成功"
+            echo "$DECODE_RESULT" > "$RESULTS_DIR/${test_name}_tx.json"
+            return 0
+        fi
+    fi
+}
+
+# 测试2 - 渐进式测试，找出脚本大小限制
+echo -e "\n2. 渐进式测试不同数量的ZK证明元素"
+
+# 测试不同元素数量的交易创建和解码
+test_sizes=(1 2 3 4 5 8 12 $ELEMENT_COUNT)
+for size in "${test_sizes[@]}"; do
+    if [ $size -le $ELEMENT_COUNT ]; then
+        test_with_elements $size false
+        echo "--------------------------"
     fi
 done
 
-# 2.2 特别测试NOP系列和CHECKZKP
-echo -e "\n测试NOP系列和CHECKZKP操作码..."
-echo "NOP系列和CHECKZKP操作码测试:" > "$RESULTS_DIR/nop_opcode_test.txt"
+# 测试十六进制格式的交易
+echo -e "\n3. 测试十六进制格式的交易"
+test_with_elements 4 true
 
-# 使用另一种方法测试NOP系列解析
-for i in {0..10}; do
-    if [ $i -eq 0 ]; then
-        HEX_CODE="61"
-        NAME="OP_NOP"
-    elif [ $i -eq 2 ]; then
-        HEX_CODE="b1"
-        NAME="OP_CHECKLOCKTIMEVERIFY(NOP2)"
-    elif [ $i -eq 3 ]; then
-        HEX_CODE="b2"
-        NAME="OP_CHECKSEQUENCEVERIFY(NOP3)" 
-    elif [ $i -eq 10 ]; then
-        HEX_CODE="b9"
-        NAME="OP_CHECKZKP(NOP10)"
-    else
-        HEX_CODE=$(printf "%x" $((0xaf + i)))
-        NAME="OP_NOP${i}"
-    fi
-    
-    SCRIPT="51${HEX_CODE}" # OP_1 + 测试操作码
-    RESULT=$($DOGECOIN_TX $RAW_TX outscript=0.1:$SCRIPT 2>&1)
-    
-    if [[ "$RESULT" == *"error"* ]]; then
-        echo "  ${NAME} (0x${HEX_CODE}) 不被支持: ${RESULT}" | tee -a "$RESULTS_DIR/nop_opcode_test.txt"
-    else
-        echo "  ${NAME} (0x${HEX_CODE}) 被支持" | tee -a "$RESULTS_DIR/nop_opcode_test.txt"
+# 使用OP_RETURN测试
+echo -e "\n4. 使用OP_RETURN创建包含ZK证明数据的交易"
+
+# 尝试使用不同大小的数据元素
+for i in 0 1 2; do
+    if [[ -n "${ZKP_ELEMENTS[$i]}" && "${ZKP_ELEMENTS[$i]}" != "null" ]]; then
+        OP_RETURN_DATA="${ZKP_ELEMENTS[$i]}"
+        ELEMENT_BYTES=$((${#OP_RETURN_DATA} / 2))
+        
+        echo "使用元素 $i 作为OP_RETURN数据 ($ELEMENT_BYTES 字节): $OP_RETURN_DATA"
+        TX_RESULT=$($DOGECOIN_TX -create outdata=0:"$OP_RETURN_DATA" 2>&1)
+        
+        # 保存结果
+        echo "$TX_RESULT" > "$LOGS_DIR/opreturn_${i}_result.log"
+        
+        if [[ "$TX_RESULT" == *"error"* ]]; then
+            echo "✗ OP_RETURN交易创建失败: $TX_RESULT"
+        else
+            echo "✓ OP_RETURN交易创建成功"
+            echo "$TX_RESULT" > "$RESULTS_DIR/opreturn_${i}_tx.hex"
+            
+            # 尝试解码
+            DECODE_RESULT=$($DOGECOIN_TX -json $(cat "$RESULTS_DIR/opreturn_${i}_tx.hex") 2>&1)
+            if [[ "$DECODE_RESULT" == *"error"* ]]; then
+                echo "✗ OP_RETURN交易解码失败: $DECODE_RESULT"
+            else
+                echo "✓ OP_RETURN交易解码成功"
+                echo "$DECODE_RESULT" > "$RESULTS_DIR/opreturn_${i}_tx.json"
+            fi
+        fi
+        echo "--------------------------"
     fi
 done
 
-# ----------------------------------------------------------------
-# 3. 间接证明测试 - 使用OP_RETURN输出包含CHECKZKP数据
-# ----------------------------------------------------------------
-echo -e "\n测试3: 使用OP_RETURN间接测试OP_CHECKZKP"
-RAW_TX=$($DOGECOIN_TX -create)
-RAW_TX=$($DOGECOIN_TX $RAW_TX in=$TXID:$VOUT)
+# 总结测试结果
+echo -e "\n=== 测试总结 ==="
+echo "1. ZK证明数据:"
+echo "   - 总元素数: $ELEMENT_COUNT"
+echo "   - 总数据大小: $TOTAL_BYTES 字节"
+echo "2. 交易创建测试:"
 
-# 使用OP_RETURN输出包含0xb9值
-ZKP_DATA="b9" # OP_CHECKZKP字节值
-RAW_TX_HEX=$($DOGECOIN_TX $RAW_TX outdata=0:$ZKP_DATA 2>&1)
-
-if [[ "$RAW_TX_HEX" == *"error"* ]]; then
-    echo "✗ OP_RETURN测试失败: $RAW_TX_HEX"
-else
-    echo "✓ OP_RETURN测试成功"
-    RAW_TX=$RAW_TX_HEX
-    $DOGECOIN_TX -json $RAW_TX > "$RESULTS_DIR/op_return_test.json"
-    
-    # 分析交易确认包含正确数据
-    if grep -q '"asm": "OP_RETURN 185"' "$RESULTS_DIR/op_return_test.json"; then
-        echo "  确认: 交易包含十进制值185 (0xb9)"
-    else
-        echo "  警告: 未确认正确的数据值"
+# 检查各种大小的测试结果
+for size in "${test_sizes[@]}"; do
+    if [ $size -le $ELEMENT_COUNT ]; then
+        STATUS="失败"
+        if [ -f "$RESULTS_DIR/elements_${size}_tx.hex" ]; then 
+            STATUS="成功"
+            if [ -f "$RESULTS_DIR/elements_${size}_tx.json" ]; then
+                STATUS="成功 (解码成功)"
+            else
+                STATUS="成功 (解码失败)"
+            fi
+        fi
+        echo "   - $size 个元素: $STATUS"
     fi
-fi
+done
 
-# ----------------------------------------------------------------
-# 4. 解析器分析 - 检查core_io.cpp中的ParseScript限制
-# ----------------------------------------------------------------
-echo -e "\n测试4: 分析脚本解析器实现"
-
-if [ -f "$DOGECOIN_SRC/core_io.cpp" ]; then
-    # 检查ParseScript对NOP系列的特殊处理
-    grep -A 20 "ParseScript" "$DOGECOIN_SRC/core_io.cpp" > "$RESULTS_DIR/parse_script_impl.txt"
-    
-    # 寻找解析器中可能的限制
-    grep -n "error" "$RESULTS_DIR/parse_script_impl.txt" | \
-       grep -i "opcode\|script\|parse" > "$RESULTS_DIR/parse_script_restrictions.txt"
-    
-    if [ -s "$RESULTS_DIR/parse_script_restrictions.txt" ]; then
-        echo "发现潜在的解析器限制:"
-        cat "$RESULTS_DIR/parse_script_restrictions.txt"
+echo "3. 十六进制格式测试:"
+if [ -f "$RESULTS_DIR/hex_elements_4_tx.hex" ]; then
+    HEX_STATUS="成功"
+    if [ -f "$RESULTS_DIR/hex_elements_4_tx.json" ]; then
+        HEX_STATUS="成功 (解码成功)"
     else
-        echo "未找到明显的解析器限制"
+        HEX_STATUS="成功 (解码失败)"
     fi
 else
-    echo "找不到core_io.cpp文件"
+    HEX_STATUS="失败"
 fi
+echo "   - 十六进制格式: $HEX_STATUS"
 
-# ----------------------------------------------------------------
-# 5. 建议的单元测试和验证方法
-# ----------------------------------------------------------------
-echo -e "\n测试5: 提供正确的测试方法建议"
+# 检查OP_RETURN测试结果
+echo "4. OP_RETURN测试:"
+for i in 0 1 2; do
+    if [ -f "$RESULTS_DIR/opreturn_${i}_tx.hex" ]; then
+        OP_STATUS="成功"
+        if [ -f "$RESULTS_DIR/opreturn_${i}_tx.json" ]; then
+            OP_STATUS="成功 (解码成功)"
+        else
+            OP_STATUS="成功 (解码失败)"
+        fi
+    else
+        OP_STATUS="失败"
+    fi
+    # 只有当有结果文件时才显示
+    if [ -f "$LOGS_DIR/opreturn_${i}_result.log" ]; then
+        echo "   - 元素 $i: $OP_STATUS"
+    fi
+done
 
-cat << EOF > "$RESULTS_DIR/testing_recommendations.txt"
-# OP_CHECKZKP 正确测试方法建议
+echo -e "\n可能的错误原因分析:"
+echo "1. 脚本大小限制 - 交易脚本可能超过Dogecoin的最大允许大小"
+echo "2. 数据格式问题 - 解码器可能无法正确解析长字节序列"
+echo "3. OP_CHECKZKP实现 - 操作码存在但完整实现尚未完成"
 
-## 1. 单元测试方法
-使用C++单元测试框架直接测试脚本验证:
-
-\`\`\`cpp
-#include <boost/test/unit_test.hpp>
-#include "script/script.h"
-#include "script/interpreter.h"
-
-BOOST_AUTO_TEST_CASE(op_checkzkp_test)
-{
-    // 直接创建包含OP_CHECKZKP的脚本
-    CScript script;
-    script << OP_1 << OP_CHECKZKP;
-    
-    // 验证脚本包含正确的操作码
-    CScript::const_iterator pc = script.begin();
-    opcodetype opcode;
-    script.GetOp(pc, opcode);
-    BOOST_CHECK_EQUAL(opcode, OP_1);
-    
-    script.GetOp(pc, opcode);
-    BOOST_CHECK_EQUAL(opcode, OP_CHECKZKP);
-    BOOST_CHECK_EQUAL(opcode, 0xb9);
-}
-\`\`\`
-
-## 2. 使用测试模式
-在测试网络(regtest)中启用所需的软分叉:
-
-\`\`\`bash
-dogecoin-cli -regtest setmocktime <未来时间>  # 模拟激活时间
-\`\`\`
-
-## 3. 修改解析器进行测试
-临时修改ParseScript函数允许所有操作码:
-
-\`\`\`cpp
-// 在 core_io.cpp 中
-bool ParseScript(const std::string& str, CScript& script, bool allowNoActiveOpCodes = true)
-{
-    // 添加allowNoActiveOpCodes参数跳过操作码限制
-}
-\`\`\`
-EOF
-
-echo "已生成测试建议到 $RESULTS_DIR/testing_recommendations.txt"
-
-# ----------------------------------------------------------------
-# 6. 总结与结论
-# ----------------------------------------------------------------
-echo -e "\n=== 测试总结与结论 ==="
-
-# 检查DIP-69规范合规性
-echo "DIP-69规范合规性检查:"
-
-SOURCE_DEF_OK=false
-if grep -q "OP_CHECKZKP = 0xb9" "$DOGECOIN_SRC/script/script.h" && \
-   grep -q "OP_NOP10 = OP_CHECKZKP" "$DOGECOIN_SRC/script/script.h"; then
-   SOURCE_DEF_OK=true
-   echo "✓ 源码定义: 正确 - OP_CHECKZKP定义为0xb9并别名为OP_NOP10"
-else
-   echo "✗ 源码定义: 不正确 - OP_CHECKZKP未按规范定义"
-fi
-
-TX_TOOL_LIMIT=false
-if grep -q "error: script parse error" "$RESULTS_DIR/nop_opcode_test.txt"; then
-   TX_TOOL_LIMIT=true
-   echo "✓ 工具限制: 已确认 - dogecoin-tx不支持高级操作码，这是预期行为"
-else
-   echo "✗ 工具限制: 未确认 - 测试结果与预期不符"
-fi
-
-OP_RETURN_OK=false
-if [ -f "$RESULTS_DIR/op_return_test.json" ]; then
-   OP_RETURN_OK=true
-   echo "✓ 间接测试: 通过 - 可以使用OP_RETURN包含OP_CHECKZKP值"
-else
-   echo "✗ 间接测试: 失败 - OP_RETURN测试未成功"
-fi
-
-echo ""
-echo "最终结论:"
-if $SOURCE_DEF_OK; then
-   echo "1. OP_CHECKZKP的源码实现符合DIP-69规范"
-   echo "2. dogecoin-tx工具限制是预期的，不影响操作码本身的正确性"
-   echo "3. 需要使用单元测试或在激活后才能完全验证功能"
-else
-   echo "1. OP_CHECKZKP的源码实现可能需要修正以符合DIP-69规范"
-   echo "2. 建议检查script.h中的操作码定义"
-fi
-
-echo ""
-echo "=== 测试完成 ==="
+echo -e "\n详细日志和结果已保存到 $RESULTS_DIR 和 $LOGS_DIR"
